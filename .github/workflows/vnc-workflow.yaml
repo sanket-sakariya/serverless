@@ -20,8 +20,9 @@ jobs:
           wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo dpkg -i /tmp/chrome.deb || sudo apt-get install -f -y
 
-          wget -q -O /tmp/antigravity.deb https://storage.googleapis.com/antigravity-downloads/stable/linux/antigravity_amd64.deb
-          sudo dpkg -i /tmp/antigravity.deb || sudo apt-get install -f -y
+          # Antigravity (optional - skip if download fails)
+          wget -q -O /tmp/antigravity.deb https://storage.googleapis.com/antigravity-downloads/stable/linux/antigravity_amd64.deb || echo "⚠️ Antigravity download failed, skipping"
+          [ -f /tmp/antigravity.deb ] && sudo dpkg -i /tmp/antigravity.deb || true
 
           wget -q -O /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i /tmp/cloudflared.deb
