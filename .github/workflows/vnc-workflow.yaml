@@ -2,12 +2,20 @@ name: VNC Desktop
 on:
   workflow_dispatch:
 
+env:
+  PROFILE_RELEASE_TAG: browser-profile
+  PROFILE_ASSET_NAME: chrome-profile.tar.gz
+  CHROME_PROFILE_DIR: /home/runner/.config/google-chrome
+
 jobs:
   desktop:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install desktop, Chrome, Antigravity, VNC, noVNC, Python, cloudflared
         run: |
           set -e
@@ -15,7 +23,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             xfce4 xfce4-terminal dbus-x11 x11-utils x11-xserver-utils xfonts-base \
             tightvncserver novnc websockify \
-            python3 python3-venv python3-pip
+            python3 python3-venv python3-pip jq
 
           wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo dpkg -i /tmp/chrome.deb || sudo apt-get install -f -y
@@ -26,6 +34,30 @@ jobs:
 
           wget -q -O /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i /tmp/cloudflared.deb
+
+      - name: Download browser profile from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          mkdir -p "$CHROME_PROFILE_DIR"
+          
+          echo "📦 Checking for existing browser profile in releases..."
+          
+          # Try to get download URL for the profile asset
+          DOWNLOAD_URL=$(gh release view "$PROFILE_RELEASE_TAG" --json assets -q ".assets[] | select(.name==\"$PROFILE_ASSET_NAME\") | .url" 2>/dev/null || echo "")
+          
+          if [ -n "$DOWNLOAD_URL" ]; then
+            echo "✅ Found existing profile, downloading..."
+            gh release download "$PROFILE_RELEASE_TAG" --pattern "$PROFILE_ASSET_NAME" -D /tmp
+            
+            echo "📂 Extracting profile..."
+            tar -xzf "/tmp/$PROFILE_ASSET_NAME" -C "$CHROME_PROFILE_DIR"
+            rm -f "/tmp/$PROFILE_ASSET_NAME"
+            echo "✅ Browser profile restored successfully!"
+          else
+            echo "ℹ️ No existing profile found, starting fresh"
+          fi
 
       - name: Create Python venv
         run: |
@@ -45,6 +77,23 @@ jobs:
           vncserver :1 -geometry 1920x1080 -depth 24 -rfbport 5901
           websockify -D --web=/usr/share/novnc 6080 localhost:5901
 
+      - name: Launch Chrome with saved profile
+        run: |
+          export DISPLAY=:1
+          sleep 3
+          
+          echo "🌐 Launching Chrome with saved profile..."
+          nohup google-chrome \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-sync \
+            --user-data-dir="$CHROME_PROFILE_DIR" \
+            --start-maximized \
+            > /tmp/chrome.log 2>&1 &
+          
+          sleep 2
+          echo "✅ Chrome launched with profile from: $CHROME_PROFILE_DIR"
+
       - name: Expose via Cloudflare tunnel
         run: |
           nohup cloudflared tunnel --no-autoupdate --url http://localhost:6080 > /tmp/cf.log 2>&1 &
@@ -59,8 +108,57 @@ jobs:
           echo "🔑 Password: sanket11"
           echo "============================================================"
 
-      - name: Keep alive
+      - name: Keep alive and upload profile on exit
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # Function to upload browser profile
+          upload_profile() {
+            echo ""
+            echo "============================================================"
+            echo "🔄 Workflow stopping, checking browser profile..."
+            echo "============================================================"
+            
+            if [ -d "$CHROME_PROFILE_DIR" ]; then
+              # Create archive
+              cd "$CHROME_PROFILE_DIR"
+              tar -czf "/tmp/$PROFILE_ASSET_NAME" .
+              
+              # Check size (500MB = 524288000 bytes)
+              SIZE=$(stat -c%s "/tmp/$PROFILE_ASSET_NAME")
+              SIZE_MB=$((SIZE / 1024 / 1024))
+              
+              echo "📦 Profile archive size: ${SIZE_MB}MB"
+              
+              if [ "$SIZE" -lt 524288000 ]; then
+                echo "✅ Size < 500MB, uploading to release..."
+                
+                # Create release if it doesn't exist
+                if ! gh release view "$PROFILE_RELEASE_TAG" &>/dev/null; then
+                  echo "📝 Creating new release: $PROFILE_RELEASE_TAG"
+                  gh release create "$PROFILE_RELEASE_TAG" --title "Browser Profile Storage" --notes "Auto-managed browser profile for VNC workflow"
+                fi
+                
+                # Delete old asset if exists and upload new one
+                gh release delete-asset "$PROFILE_RELEASE_TAG" "$PROFILE_ASSET_NAME" --yes 2>/dev/null || true
+                gh release upload "$PROFILE_RELEASE_TAG" "/tmp/$PROFILE_ASSET_NAME" --clobber
+                
+                echo "✅ Browser profile uploaded successfully!"
+              else
+                echo "⚠️ Profile size (${SIZE_MB}MB) exceeds 500MB limit, skipping upload"
+              fi
+              
+              rm -f "/tmp/$PROFILE_ASSET_NAME"
+            else
+              echo "ℹ️ No profile directory found, nothing to upload"
+            fi
+          }
+          
+          # Set trap to upload on exit (SIGTERM, SIGINT, or normal exit)
+          trap upload_profile EXIT SIGTERM SIGINT
+          
+          echo "🖥️ Desktop is running. Profile will be saved on workflow stop."
+          
           while true; do
             pgrep -f "Xtightvnc.*:1" > /dev/null || vncserver :1 -geometry 1920x1080 -depth 24 -rfbport 5901
             sleep 60
